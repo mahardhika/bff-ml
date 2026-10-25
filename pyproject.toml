@@ -71,10 +71,6 @@ all = [
     "bff-ml[cuda,rocm,directml,cpu,notebook,dev]",
 ]
 
-Documentation = "https://github.com/bff-demo/camera-ai/blob/main/system-map-arsitektur.MD"
-Source = "https://github.com/bff-demo/camera-ai"
-Issues = "https://github.com/bff-demo/camera-ai/issues"
-
 [project.scripts]
 bff-ml = "ml.__main__:main"
 bff-ml-train = "ml.__main__:train"

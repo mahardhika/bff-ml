@@ -29,6 +29,11 @@ from unittest import mock
 
 import pytest
 
+try:  # pragma: no cover - import style depends on the tests/ layout
+    from _bff_paths import repo_root
+except ImportError:  # pragma: no cover
+    from tests._bff_paths import repo_root
+
 torch = pytest.importorskip("torch", reason="torch required for device tests")
 
 
@@ -146,7 +151,7 @@ def test_train_resolves_dml_on_windows_then_cpu(
         ],
         capture_output=True, text=True, timeout=120,
         env=env,
-        cwd=str(Path(__file__).resolve().parents[2]),  # repo root
+        cwd=str(repo_root()),  # repo root
     )
     assert out.returncode == 0, (
         f"`ml train --device cpu` failed.\nSTDOUT(last 400):\n"
