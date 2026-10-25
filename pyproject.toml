@@ -110,6 +110,6 @@ markers = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/bff-demo/bff-ml/blob/main/README.md"
-Source = "https://github.com/bff-demo/bff-ml"
-Issues = "https://github.com/bff-demo/bff-ml/issues"
+Documentation = "https://github.com/mahardhika/bff-ml/blob/main/README.md"
+Source = "https://github.com/mahardhika/bff-ml"
+Issues = "https://github.com/mahardhika/bff-ml/issues"

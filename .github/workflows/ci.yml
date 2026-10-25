@@ -33,10 +33,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install bff-core from git
+      - name: Install bff-core from git (private repo)
         env:
-          BFF_CORE_REF: ${{{{ vars.BFF_CORE_REF || 'git+https://github.com/bff-demo/bff-core.git@v0.1.0' }}}}
-        run: pip install "${{BFF_CORE_REF}}"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BFF_CORE_REF: git+https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/mahardhika/bff-core.git@v0.1.0
+        run: pip install "$BFF_CORE_REF"
       - name: Install torch (CPU only on CI)
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install

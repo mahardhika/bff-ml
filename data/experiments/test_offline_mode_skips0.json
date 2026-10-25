@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "kind": "detector",
   "run_name": "test_offline_mode_skips0",
-  "run_dir": "C:\\Users\\mahar\\AppData\\Local\\Temp\\pytest-of-mahar\\pytest-144\\test_offline_mode_skips0",
+  "run_dir": "C:\\Users\\mahar\\AppData\\Local\\Temp\\pytest-of-mahar\\pytest-151\\test_offline_mode_skips0",
   "hyperparams": {},
   "metrics": {},
   "split": "train",
@@ -11,6 +11,6 @@
   "path": "BFF/models/m/0.0.0/detector.onnx",
   "model_card_url": "BFF/models/m/0.0.0/MODEL_CARD.md",
   "started_at": null,
-  "finished_at": "2026-10-25T12:39:57.816253Z",
-  "deferred_at": "2026-10-25T12:39:57.822164Z"
+  "finished_at": "2026-10-25T12:49:10.142012Z",
+  "deferred_at": "2026-10-25T12:49:10.142012Z"
 }

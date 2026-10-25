@@ -9,7 +9,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-ARG BFF_CORE_REF=git+https://github.com/bff-demo/bff-core.git@v0.1.0
+# bff-core is private: override with a token URL when building locally.
+#   docker build --build-arg \
+#     BFF_CORE_REF=git+https://x-access-token:<TOKEN>@github.com/mahardhika/bff-core.git@v0.1.0 .
+ARG BFF_CORE_REF=git+https://github.com/mahardhika/bff-core.git@v0.1.0
 
 WORKDIR /app
 

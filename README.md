@@ -8,7 +8,7 @@ Supabase Storage sync.
 ## Install
 
 ```bash
-pip install "bff-core @ git+https://github.com/bff-demo/bff-core.git@v0.1.0"
+pip install "bff-core @ git+https://github.com/mahardhika/bff-core.git@v0.1.0"
 pip install -e ".[cuda,dev]"
 ```
 
