@@ -1,0 +1,58 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# ===== Virtual envs =====
+.venv/
+venv/
+env/
+
+# ===== Test / coverage =====
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===== Lint / type =====
+.ruff_cache/
+.mypy_cache/
+
+# ===== Local runtime data =====
+data/cache/
+data/work/
+data/models/*
+!data/models/.gitkeep
+data/logs/
+data/inbox/
+data/train/
+runs/
+
+# ===== Outputs =====
+*.mp4
+*.mov
+*.onnx
+*.pt
+*.pth
+*.log
+
+# ===== Secrets =====
+.env
+.env.*
+!.env.example
+.main-env
+*.pem
+*.key
+
+# ===== OS / editor =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.bak
+*.swp
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
