@@ -86,10 +86,17 @@ def build_fill_classifier(num_classes: int = 5, input_size: int = 224) -> FillCl
 
 def export_onnx(model: FillClassifier, onnx_path: str, input_size: int = 224,
                 opset: int = 13) -> None:
+    import copy
     model.eval()
+    # DirectML tensors cannot be exported: copy to the CPU first.
+    export_model = copy.deepcopy(model)
+    try:
+        export_model = export_model.to("cpu")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not move the model to the CPU for export: %s", exc)
     dummy = torch.zeros(1, 3, input_size, input_size)
     torch.onnx.export(
-        model, dummy, onnx_path, opset_version=opset,
+        export_model, dummy, onnx_path, opset_version=opset,
         input_names=["input"], output_names=["logits"],
         dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
     )

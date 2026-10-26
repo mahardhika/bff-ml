@@ -28,7 +28,7 @@ from ml.data.load import CACHE_TTL_DAYS
 log = logging.getLogger(__name__)
 
 
-def _pick_device():
+def _pick_device(want: str | None = None):
     """Decide the runtime device from env + platform.
 
     Returns a value `torch.device(...)` can parse: a string like
@@ -39,7 +39,7 @@ def _pick_device():
     prefixed string here produced `RuntimeError: Invalid device
     string: 'dml:privateuseone:0'` on Windows.
     """
-    want = os.getenv("INFERENCE_PROVIDER", "auto").lower()
+    want = (want or os.getenv("INFERENCE_PROVIDER", "auto")).lower()
     if want == "cuda":
         try:
             import torch  # type: ignore
@@ -71,6 +71,8 @@ def _pick_device():
 def main(argv: list[str] | None = None) -> None:
     from ml.env import load_env_files
     load_env_files()
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     p = argparse.ArgumentParser(description="Train a BFF model.")
     p.add_argument("--data-source", default="local", choices=["local", "s3", "db", "url"])
@@ -87,6 +89,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--model-name", default="bucket-detector")
     p.add_argument("--version", default="0.1.0")
     p.add_argument("--kind", default="detector", choices=["detector", "classifier"])
+    p.add_argument("--num-classes", type=int, default=0,
+                   help="classes in the model head; 0 = take them from the dataset")
+    p.add_argument("--input-size", type=int, default=0,
+                   help="detector input size; 0 = DETECTOR_INPUT_SIZE (640)")
+    p.add_argument("--workers", type=int, default=0,
+                   help="dataloader workers; >0 keeps the GPU fed on Windows")
+    p.add_argument("--max-images", type=int, default=0,
+                   help="stop after N images (quick runs); 0 = whole dataset")
+    p.add_argument("--limit-images", type=int, default=0,
+                   help="alias of --max-images")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -98,7 +110,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--output-dir", default="./runs")
     args = p.parse_args(argv)
 
-    device = args.device if args.device != "auto" else _pick_device()
+    device = _pick_device(None if args.device == "auto" else args.device)
     # Round-trip through torch.device(...) so unknown backends (xpu,
     # hpu, …) downgrade to cpu before we try `model.to(device)`.
     try:
@@ -131,6 +143,23 @@ def main(argv: list[str] | None = None) -> None:
         raise NotImplementedError("url source is v0.2")
     log.info("Dataset: root=%s kind=%s classes=%s", ds.root, ds.kind, ds.classes)
 
+    # Class count follows the dataset (COCO categories), so one trainer
+    # serves the 3-class product model and wider public datasets alike.
+    if args.num_classes > 0:
+        num_classes = int(args.num_classes)
+    elif ds.classes:
+        num_classes = len(ds.classes)
+    elif args.kind == "classifier":
+        num_classes = 5
+    else:
+        num_classes = 3
+    if ds.classes and args.num_classes > 0 and args.num_classes != len(ds.classes):
+        log.warning("num_classes=%d but the dataset lists %d classes: %s",
+                    args.num_classes, len(ds.classes), list(ds.classes))
+    class_names = list(ds.classes) or [f"class_{i}" for i in range(num_classes)]
+    log.info("Model head: %d classes -> %s", num_classes, class_names)
+    input_size = args.input_size or int(os.getenv("DETECTOR_INPUT_SIZE", "640"))
+
     out = Path(args.output_dir) / run_name
     out.mkdir(parents=True, exist_ok=True)
 
@@ -146,6 +175,9 @@ def main(argv: list[str] | None = None) -> None:
         "dataset_id": args.dataset_id,
         "force_download": bool(args.force_download),
         "cache_ttl_days": float(args.cache_ttl_days),
+        "num_classes": num_classes,
+        "classes": class_names,
+        "input_size": input_size,
     }
     (out / "hparams.json").write_text(json.dumps(hparams, indent=2))
 
@@ -154,9 +186,10 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         import torch  # type: ignore
-        from ml.models.yolox import build_yolox_s
+
         from ml.models.classifier import build_fill_classifier
         from ml.models.loss import YOLOXLoss
+        from ml.models.yolox import build_yolox_s
         torch_available = True
     except ImportError:
         torch_available = False
@@ -167,11 +200,11 @@ def main(argv: list[str] | None = None) -> None:
     n_boxes = 0
 
     if args.kind == "detector":
-        log.info("Building YOLOX-S detector (3 classes: bucket, truck, person).")
+        log.info("Building YOLOX-S detector (%d classes).", num_classes)
         if torch_available:
-            model = build_yolox_s(num_classes=3, input_size=input_size)
+            model = build_yolox_s(num_classes=num_classes, input_size=input_size)
             opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-            loss_fn = YOLOXLoss(num_classes=3)
+            loss_fn = YOLOXLoss(num_classes=num_classes)
             model.to(device)
             last_loss, n_images, n_boxes = _train_detector(
                 model, loss_fn, opt, ds, args, device, input_size)
@@ -181,9 +214,9 @@ def main(argv: list[str] | None = None) -> None:
                 time.sleep(0.05)
                 log.info("epoch %d/%d in 0.1s", epoch, args.epochs)
     else:
-        log.info("Building FillClassifier (5 classes).")
+        log.info("Building FillClassifier (%d classes).", num_classes)
         if torch_available:
-            model = build_fill_classifier(num_classes=5, input_size=224)
+            model = build_fill_classifier(num_classes=num_classes, input_size=224)
             opt = torch.optim.Adam(model.parameters(), lr=args.lr)
             model.to(device)
             last_loss, n_images, n_boxes = _train_classifier(
@@ -217,7 +250,10 @@ def main(argv: list[str] | None = None) -> None:
             ckpt = out / "model.pt"
             try:
                 import torch as _torch
-                _torch.save(model.state_dict(), ckpt)
+                # CPU tensors keep the checkpoint portable (a DirectML
+                # state dict cannot be reloaded outside the device).
+                _torch.save({k: v.detach().cpu()
+                             for k, v in model.state_dict().items()}, ckpt)
             except Exception as exc:  # noqa: BLE001
                 log.warning("checkpoint save failed: %s", exc)
         except Exception as exc:  # noqa: BLE001
@@ -226,6 +262,17 @@ def main(argv: list[str] | None = None) -> None:
     else:
         onnx_path.write_bytes(b"")
     log.info("ONNX written: %s", onnx_path)
+
+    # 3b. Class list next to the weights. The backend reads it to map
+    # head indices to labels instead of assuming bucket/truck/person.
+    labels_path = out / "labels.json"
+    labels_path.write_text(json.dumps({
+        "classes": class_names,
+        "num_classes": num_classes,
+        "kind": args.kind,
+        "input_size": input_size,
+    }, indent=2), encoding="utf-8")
+    log.info("labels.json written: %s", labels_path)
 
     # 4. Model card.
     card = out / "MODEL_CARD.md"
@@ -245,6 +292,11 @@ def main(argv: list[str] | None = None) -> None:
     log.info("Run finished in %.1fs. Artifacts at %s", time.time() - started, out)
 
 
+def _max_images(args) -> int:
+    """Image cap for quick runs: ``--max-images`` (or its alias)."""
+    return int(getattr(args, "max_images", 0) or getattr(args, "limit_images", 0) or 0)
+
+
 def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
                     ) -> tuple[float, int, int]:
     import torch
@@ -253,7 +305,8 @@ def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
     from ml.data.torch_dataset import DetectionFrames, collate_detections
     from ml.models.assign import assign
 
-    frames = DetectionFrames(ds, input_size=input_size, train=True)
+    frames = DetectionFrames(ds, input_size=input_size, train=True,
+                             limit=_max_images(args))
     n_images = len(frames)
     n_boxes = 0
     last_loss = 0.0
@@ -277,7 +330,9 @@ def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
 
     loader = DataLoader(
         frames, batch_size=max(1, min(args.batch_size, n_images)),
-        shuffle=True, collate_fn=collate_detections, num_workers=0,
+        shuffle=True, collate_fn=collate_detections,
+        num_workers=max(0, int(getattr(args, "workers", 0) or 0)),
+        persistent_workers=bool(int(getattr(args, "workers", 0) or 0)),
     )
     best = float("inf")
     stale = 0
@@ -288,7 +343,9 @@ def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
         running = 0.0
         steps = 0
         epoch_boxes = 0
-        for batch in loader:
+        batch_t = time.time()
+        seen_total = 0
+        for bi, batch in enumerate(loader, start=1):
             images = batch["image"].to(device)
             boxes = [b.to(device) for b in batch["boxes"]]
             cls = [c.to(device) for c in batch["cls"]]
@@ -302,6 +359,16 @@ def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
             opt.step()
             running += float(total.detach().cpu())
             steps += 1
+            if bi % 25 == 0 or bi == len(loader):
+                now = time.time()
+                window = now - batch_t
+                done = bi * images.shape[0]
+                rate = (done - seen_total) / max(1e-6, window)
+                log.info("  batch %d/%d  %.2f img/s  loss=%.4f",
+                         bi, len(loader), rate,
+                         running / max(1, steps))
+                batch_t = now
+                seen_total = done
         last_loss = running / max(1, steps)
         n_boxes = epoch_boxes
         log.info("epoch %d/%d loss=%.4f in %.1fs",
@@ -324,7 +391,8 @@ def _train_classifier(model, opt, ds, args, device) -> tuple[float, int, int]:
 
     from ml.data.torch_dataset import DetectionFrames, collate_detections
 
-    frames = DetectionFrames(ds, input_size=224, train=True)
+    frames = DetectionFrames(ds, input_size=224, train=True,
+                             limit=_max_images(args))
     n_images = len(frames)
     last_loss = 0.0
     if n_images == 0:
@@ -348,7 +416,9 @@ def _train_classifier(model, opt, ds, args, device) -> tuple[float, int, int]:
 
     loader = DataLoader(
         frames, batch_size=max(1, min(args.batch_size, n_images)),
-        shuffle=True, collate_fn=collate_detections, num_workers=0,
+        shuffle=True, collate_fn=collate_detections,
+        num_workers=max(0, int(getattr(args, "workers", 0) or 0)),
+        persistent_workers=bool(int(getattr(args, "workers", 0) or 0)),
     )
     best = float("inf")
     stale = 0

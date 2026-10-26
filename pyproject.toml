@@ -44,7 +44,11 @@ dependencies = [
 [project.optional-dependencies]
 # GPU training backends.
 directml = [
+    # torch-directml 0.2.5 is built against the torch 2.4 ABI: a newer
+    # torch fails to load the DirectML DLL ("procedure could not be
+    # found"), so the version is pinned here.
     "torch-directml>=0.2.5 ; sys_platform == 'win32'",
+    "torch==2.4.1 ; sys_platform == 'win32'",
 ]
 cuda = [
     "torch>=2.2",

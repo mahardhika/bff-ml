@@ -100,7 +100,11 @@ class YOLOXLoss(nn.Module):
 
             cls_logits = pred[:, 5:].permute(0, 2, 3, 1)[pos]
             cls_ids = assigned["target_cls"][pos].clamp(0, self.num_classes - 1)
-            cls_oh = F.one_hot(cls_ids, num_classes=self.num_classes).to(pred.dtype)
+            # One-hot by comparison, not F.one_hot: the scatter inside
+            # F.one_hot is rejected by the DirectML backend.
+            cls_oh = (cls_ids.unsqueeze(-1)
+                      == torch.arange(self.num_classes, device=cls_ids.device)
+                      ).to(pred.dtype)
             cls_acc = cls_acc + self.bce(cls_logits, cls_oh)
 
         n_pos = max(1, n_pos)

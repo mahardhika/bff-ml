@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--opset", type=int, default=13)
     p.add_argument("--input-shape", default="1,3,640,640")
     p.add_argument("--kind", default="detector", choices=["detector", "classifier"])
+    p.add_argument("--num-classes", type=int, default=3,
+                   help="classes in the head; must match the checkpoint")
     args = p.parse_args(argv)
 
     log.info("Loading checkpoint: %s", args.ckpt)
@@ -47,15 +49,16 @@ def main(argv: list[str] | None = None) -> None:
     shape = tuple(int(s) for s in args.input_shape.split(","))
     try:
         if args.kind == "detector":
-            from ml.models.yolox import YOLOXS, export_onnx as _yolox_export
-            model = YOLOXS()
+            from ml.models.yolox import (YOLOXConfig, YOLOXS,
+                                         export_onnx as _yolox_export)
+            model = YOLOXS(YOLOXConfig(num_classes=int(args.num_classes)))
             model.load_state_dict(torch.load(src, map_location="cpu"))
             model.eval()
             _yolox_export(model, str(dst), input_size=shape[-1], opset=args.opset)
         else:
-            from ml.models.classifier import (FillClassifier,
+            from ml.models.classifier import (ClassifierConfig, FillClassifier,
                                                export_onnx as _cls_export)
-            model = FillClassifier()
+            model = FillClassifier(ClassifierConfig(num_classes=int(args.num_classes)))
             model.load_state_dict(torch.load(src, map_location="cpu"))
             model.eval()
             _cls_export(model, str(dst), input_size=shape[-1], opset=args.opset)
@@ -71,9 +74,10 @@ def _export_with_torch(run_dir, model, train_args) -> None:
     from pathlib import Path
     canonical = "detector.onnx" if train_args.kind == "detector" else "classifier.onnx"
     out_path = Path(run_dir) / canonical
+    input_size = int(getattr(train_args, "input_size", 0) or 640)
     if train_args.kind == "detector":
         from ml.models.yolox import export_onnx as _yolox_export
-        _yolox_export(model, str(out_path), input_size=640, opset=13)
+        _yolox_export(model, str(out_path), input_size=input_size, opset=13)
     else:
         from ml.models.classifier import export_onnx as _cls_export
         _cls_export(model, str(out_path), input_size=224, opset=13)

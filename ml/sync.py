@@ -319,6 +319,13 @@ def sync_experiment(run_dir: Path, model_name: str, version: str,
                 run_dir / "MODEL_CARD.md", bucket,
                 model_object_key(model_name, version, "MODEL_CARD.md"),
             )
+        if (run_dir / "labels.json").exists():
+            # Class list for the head: the backend maps head indices to
+            # labels with it, so it must travel with the weights.
+            storage.upload_file(
+                run_dir / "labels.json", bucket,
+                model_object_key(model_name, version, "labels.json"),
+            )
         if (run_dir / "train.log").exists():
             storage.upload_file(
                 run_dir / "train.log", bucket,

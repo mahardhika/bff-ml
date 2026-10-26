@@ -15,11 +15,17 @@ class DetectionFrames:
     """Iterable of (tensor CHW float32, boxes xyxy, cls ids)."""
 
     def __init__(self, dataset: BffDataset, input_size: int = 640,
-                 train: bool = True) -> None:
+                 train: bool = True, limit: int = 0) -> None:
         try:
             self.samples = list(dataset)
         except FileNotFoundError:
             self.samples = []
+        if limit and limit > 0 and len(self.samples) > limit:
+            # Even spread over the whole list: the first N rows of a
+            # COCO export are usually one camera batch.
+            stride = len(self.samples) / float(limit)
+            picked = [self.samples[int(i * stride)] for i in range(limit)]
+            self.samples = picked
         self.input_size = input_size
         self.train = train
 

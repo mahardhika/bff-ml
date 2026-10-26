@@ -21,7 +21,7 @@ import os
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -41,10 +41,14 @@ class Dataset:
     kind: str  # "coco" | "yolo" | "raw"
     classes: Sequence[str] = ()
     extra: dict | None = None
+    #: Raw COCO category id -> model class index (0-based, contiguous).
+    #: COCO exports commonly number categories from 1; the model head is
+    #: 0-based, so this map keeps boxes and labels aligned.
+    cat_index: dict[int, int] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[tuple[Path, dict]]:
         if self.kind == "coco":
-            yield from _iter_coco(self.root)
+            yield from _iter_coco(self.root, self.cat_index)
         elif self.kind == "yolo":
             yield from _iter_yolo(self.root, self.classes)
         else:
@@ -115,8 +119,9 @@ class LocalDataset:
         self.kind = kind
 
     def load(self) -> Dataset:
-        classes = _read_classes(self.path, self.kind)
-        return Dataset(root=self.path, kind=self.kind, classes=classes)
+        classes, cat_index = _read_classes(self.path, self.kind)
+        return Dataset(root=self.path, kind=self.kind, classes=classes,
+                       cat_index=cat_index)
 
 
 class S3Dataset:
@@ -141,8 +146,9 @@ class S3Dataset:
         if is_cache_fresh(self.cache, self.ttl_days):
             log.info("S3 cache hit (age %.1fh): %s",
                      cache_age_s(self.cache) / 3600.0, self.cache)
-            return Dataset(root=self.cache, kind=self.kind,
-                           classes=_read_classes(self.cache, self.kind))
+            classes, cat_index = _read_classes(self.cache, self.kind)
+            return Dataset(root=self.cache, kind=self.kind, classes=classes,
+                           cat_index=cat_index)
 
         if any(self.cache.iterdir()):
             log.warning(
@@ -153,8 +159,9 @@ class S3Dataset:
             self.cache.mkdir(parents=True, exist_ok=True)
 
         self._download_prefix()
-        return Dataset(root=self.cache, kind=self.kind,
-                       classes=_read_classes(self.cache, self.kind))
+        classes, cat_index = _read_classes(self.cache, self.kind)
+        return Dataset(root=self.cache, kind=self.kind, classes=classes,
+                       cat_index=cat_index)
 
     def _download_prefix(self) -> None:
         """Stream-copy a prefix from Supabase Storage to local cache."""
@@ -199,11 +206,13 @@ class DbDataset:
         if is_cache_fresh(self.cache, self.ttl_days) and (self.cache / "annotations.json").exists():
             log.info("DB cache hit (age %.1fh): %s",
                      cache_age_s(self.cache) / 3600.0, self.cache)
-            return Dataset(root=self.cache, kind=self.kind,
-                           classes=_read_classes(self.cache, self.kind))
+            classes, cat_index = _read_classes(self.cache, self.kind)
+            return Dataset(root=self.cache, kind=self.kind, classes=classes,
+                           cat_index=cat_index)
         self._materialize()
-        return Dataset(root=self.cache, kind=self.kind,
-                       classes=_read_classes(self.cache, self.kind))
+        classes, cat_index = _read_classes(self.cache, self.kind)
+        return Dataset(root=self.cache, kind=self.kind, classes=classes,
+                       cat_index=cat_index)
 
     def _materialize(self) -> None:
         from bff_core.storage import StorageClient, parse_storage_path
@@ -301,34 +310,62 @@ def _hash(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
-def _read_classes(root: Path, kind: str) -> Sequence[str]:
-    if kind == "coco":
-        import json
-        ann = root / "annotations.json"
-        if not ann.exists():
-            ann = next((p for p in root.rglob("*.json")
-                        if "instances" in p.name.lower()), None)
-        if ann is None:
-            return ()
-        data = json.loads(ann.read_text())
-        cats = data.get("categories", [])
-        return tuple(c["name"] for c in sorted(cats, key=lambda c: c["id"]))
-    if kind == "yolo":
-        names = root / "classes.txt"
-        if names.exists():
-            return tuple(line.strip() for line in names.read_text().splitlines() if line.strip())
-    return ()
+def _coco_annotation_path(root: Path) -> Path | None:
+    """Locate the COCO annotation json under ``root``.
+
+    ``annotations.json`` wins; otherwise any ``*instances*.json`` below
+    the root is used (that is how CVAT / mmdetection exports name it).
+    """
+    ann = root / "annotations.json"
+    if ann.exists():
+        return ann
+    return next((p for p in root.rglob("*.json")
+                 if "instances" in p.name.lower()), None)
 
 
-def _iter_coco(root: Path) -> Iterator[tuple[Path, dict]]:
+def _coco_classes(root: Path) -> tuple[tuple[str, ...], dict[int, int]]:
+    """Class names + raw category id -> 0-based index map.
+
+    Ordered by the raw category id, so the map and the name list always
+    describe the same order. COCO exports number categories from 1 while
+    the model head is 0-based, hence the map.
+    """
     import json
-    ann_path = root / "annotations.json"
-    if not ann_path.exists():
-        ann_path = next((p for p in root.rglob("*.json")
-                         if "instances" in p.name.lower()), None)
+    ann = _coco_annotation_path(root)
+    if ann is None:
+        return (), {}
+    try:
+        data = json.loads(ann.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return (), {}
+    cats = sorted(data.get("categories") or [],
+                  key=lambda c: int(c.get("id", 0)))
+    names = tuple(str(c.get("name") or f"class_{c.get('id')}") for c in cats)
+    mapping = {int(c.get("id", i)): i for i, c in enumerate(cats)}
+    return names, mapping
+
+
+def _read_classes(root: Path, kind: str) -> tuple[tuple[str, ...], dict[int, int]]:
+    """Class names + category id map for the dataset at ``root``."""
+    if kind == "coco":
+        return _coco_classes(root)
+    if kind == "yolo":
+        names_file = root / "classes.txt"
+        if names_file.exists():
+            names = tuple(line.strip() for line in
+                          names_file.read_text().splitlines() if line.strip())
+            return names, {i: i for i in range(len(names))}
+    return (), {}
+
+
+def _iter_coco(root: Path, cat_index: dict[int, int] | None = None
+               ) -> Iterator[tuple[Path, dict]]:
+    import json
+    ann_path = _coco_annotation_path(root)
     if ann_path is None:
         raise FileNotFoundError("no COCO annotations.json found")
-    data = json.loads(ann_path.read_text())
+    data = json.loads(ann_path.read_text(encoding="utf-8"))
+    idx = dict(cat_index or {})
     img_by_id = {im["id"]: im for im in data["images"]}
     ann_by_image: dict[int, list[dict]] = {}
     for ann in data["annotations"]:
@@ -343,8 +380,9 @@ def _iter_coco(root: Path) -> Iterator[tuple[Path, dict]]:
         labels = []
         for a in anns:
             x, y, w, h = a["bbox"]
+            raw_id = int(a.get("category_id", 0))
             labels.append({
-                "category_id": a["category_id"],
+                "category_id": idx.get(raw_id, raw_id),
                 "bbox": [x, y, x + w, y + h],
             })
         yield img_path, {"boxes": labels, "width": image["width"], "height": image["height"]}

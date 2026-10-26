@@ -316,11 +316,21 @@ def build_yolox_s(num_classes: int = 3, input_size: int = 640) -> YOLOXS:
 
 def export_onnx(model: YOLOXS, onnx_path: str, input_size: int = 640,
                 opset: int = 13) -> None:
-    """Export the model to ONNX with the same input shape the BE expects."""
+    """Export the model to ONNX with the same input shape the BE expects.
+
+    The weights are pulled back to the CPU first: a model trained on
+    DirectML carries private-use-one tensors that ONNX export rejects.
+    """
+    import copy
     model.eval()
+    export_model = copy.deepcopy(model)
+    try:
+        export_model = export_model.to("cpu")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not move the model to the CPU for export: %s", exc)
     dummy = torch.zeros(1, 3, input_size, input_size)
     torch.onnx.export(
-        model, dummy, onnx_path, opset_version=opset,
+        export_model, dummy, onnx_path, opset_version=opset,
         input_names=["input"],
         output_names=["stride8", "stride16", "stride32"],
         dynamic_axes={"input": {0: "batch"}},
