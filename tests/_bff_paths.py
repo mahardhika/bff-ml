@@ -32,7 +32,14 @@ def ops_root() -> Path | None:
         path = Path(override).resolve()
         return path if path.is_dir() else None
     root = repo_root()
-    for candidate in (root / "MD ref", root.parent, root.parent / "bff-ops", root.parent / "Camera-AI"):
+    candidates = (
+        root / "MD ref",
+        root.parent / "ops",
+        root.parent,
+        root.parent / "bff-ops",
+        root.parent / "Camera-AI",
+    )
+    for candidate in candidates:
         if (candidate / "MD ref").is_dir():
             return candidate
     return None

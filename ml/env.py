@@ -32,12 +32,38 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 def workspace_root() -> Path:
-    """Workspace root: the folder that holds `.main-env`, `.env`, `Makefile`."""
-    here = Path(__file__).resolve()
+    """Workspace container: the folder that holds `.main-env`, `.env`
+    and the five sibling repos.
+
+    A directory holding at least two of the component repos is the
+    container; the ml repo root only ever holds one (`ml/` itself).
+    """
+    override = os.getenv("BFF_WORKSPACE_DIR")
+    if override:
+        path = Path(override).resolve()
+        if path.is_dir():
+            return path
+
+    here = repo_root()
+    markers = ("core", "backend", "frontend", "ml")
     for parent in here.parents:
-        if (parent / "Makefile").is_file() and (parent / "scripts").is_dir():
+        hits = sum(1 for marker in markers if (parent / marker).is_dir())
+        if hits >= 2:
             return parent
     return repo_root()
+
+def ops_root() -> Path | None:
+    """Root of the bff-ops repo, if it sits next to this one."""
+    override = os.getenv("BFF_OPS_DIR")
+    if override:
+        path = Path(override).resolve()
+        return path if path.is_dir() else None
+
+    container = workspace_root()
+    for candidate in (container / "ops", container.parent / "bff-ops"):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def load_env_files(force: bool = False) -> None:

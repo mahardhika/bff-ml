@@ -28,6 +28,7 @@ data/models/*
 data/logs/
 data/inbox/
 data/train/
+data/experiments/
 runs/
 
 # ===== Outputs =====
