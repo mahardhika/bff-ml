@@ -113,9 +113,7 @@ def _temporal_samples(root: Path, split: str, limit: int
                 labels.add(index["idle"])
         samples.append(ActivitySample(name, video_id, frame_index,
                                       tuple(sorted(labels))))
-        if limit and len(samples) >= limit:
-            break
-    return samples, classes
+    return _spread(samples, limit), classes
 
 
 def _coco_samples(root: Path, split: str, limit: int
@@ -147,9 +145,19 @@ def _coco_samples(root: Path, split: str, limit: int
         video_id = match.group(1) if match else ""
         frame_index = int(match.group(2)) if match else 0
         samples.append(ActivitySample(name, video_id, frame_index, tuple(labels)))
-        if limit and len(samples) >= limit:
-            break
-    return samples, classes
+    return _spread(samples, limit), classes
+
+
+def _spread(samples: list[ActivitySample], limit: int) -> list[ActivitySample]:
+    """Cut the list down to ``limit`` entries, evenly spread.
+
+    The frames are ordered by video, so the first N of them would all
+    come from one video. The stride keeps every video in the sample.
+    """
+    if not limit or limit <= 0 or len(samples) <= limit:
+        return samples
+    stride = len(samples) / float(limit)
+    return [samples[int(i * stride)] for i in range(limit)]
 
 
 def load_activity_samples(root: Path, split: str = "train", limit: int = 0
