@@ -68,6 +68,20 @@ def _pick_device(want: str | None = None):
     return "cpu"
 
 
+def _build_optimizer(model, device, lr: float):
+    """Move the model to the device and build the optimizer.
+
+    The order matters. On DirectML the move replaces the Parameter
+    objects, so an optimizer that was built before the move keeps the
+    old tensors and updates weights the model no longer uses: the loss
+    stays flat and the run produces an untrained model.
+    """
+    import torch
+
+    model.to(device)
+    return torch.optim.Adam(model.parameters(), lr=lr)
+
+
 def main(argv: list[str] | None = None) -> None:
     from ml.env import load_env_files
     load_env_files()
@@ -228,9 +242,8 @@ def main(argv: list[str] | None = None) -> None:
         log.info("Building YOLOX-S detector (%d classes).", num_classes)
         if torch_available:
             model = build_yolox_s(num_classes=num_classes, input_size=input_size)
-            opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+            opt = _build_optimizer(model, device, args.lr)
             loss_fn = YOLOXLoss(num_classes=num_classes)
-            model.to(device)
             last_loss, n_images, n_boxes = _train_detector(
                 model, loss_fn, opt, ds, args, device, input_size)
         else:
@@ -244,8 +257,7 @@ def main(argv: list[str] | None = None) -> None:
         if torch_available:
             model = build_fill_classifier(num_classes=num_classes,
                                           input_size=classifier_input_size)
-            opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-            model.to(device)
+            opt = _build_optimizer(model, device, args.lr)
             last_loss, n_images, val_accuracy = _train_activity(
                 model, opt, activity_root, activity_train, activity_valid,
                 args, device, classifier_input_size)
@@ -258,8 +270,7 @@ def main(argv: list[str] | None = None) -> None:
         if torch_available:
             model = build_fill_classifier(num_classes=num_classes,
                                           input_size=classifier_input_size)
-            opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-            model.to(device)
+            opt = _build_optimizer(model, device, args.lr)
             last_loss, n_images, n_boxes = _train_classifier(
                 model, opt, ds, args, device)
         else:
