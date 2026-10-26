@@ -31,6 +31,14 @@ def repo_root() -> Path:
     """Repository root (the parent of the `ml/` package)."""
     return Path(__file__).resolve().parent.parent
 
+def workspace_root() -> Path:
+    """Workspace root: the folder that holds `.main-env`, `.env`, `Makefile`."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "Makefile").is_file() and (parent / "scripts").is_dir():
+            return parent
+    return repo_root()
+
 
 def load_env_files(force: bool = False) -> None:
     """Load the `.env` chain into `os.environ`. Idempotent."""
@@ -45,12 +53,16 @@ def load_env_files(force: bool = False) -> None:
         _LOADED = True
         return
 
-    root = repo_root()
+    workspace = workspace_root()
+    repo = repo_root()
     # Highest priority first: with override=False the first writer wins.
     candidates = [
-        (root / "ml" / ".env", "ml/.env"),
-        (root / ".env", ".env"),
-        (root / ".main-env", ".main-env"),
+        (workspace / "ml" / ".env", "ml/.env"),
+        (repo / "ml" / ".env", "ml/.env"),
+        (workspace / ".env", ".env"),
+        (repo / ".env", ".env"),
+        (workspace / ".main-env", ".main-env"),
+        (repo / ".main-env", ".main-env"),
     ]
     for path, label in candidates:
         if not path.exists():
