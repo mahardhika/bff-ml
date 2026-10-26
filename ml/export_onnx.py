@@ -25,7 +25,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--opset", type=int, default=13)
     p.add_argument("--input-shape", default="1,3,640,640")
-    p.add_argument("--kind", default="detector", choices=["detector", "classifier"])
+    p.add_argument("--kind", default="detector",
+                   choices=["detector", "classifier", "activity"])
     p.add_argument("--num-classes", type=int, default=3,
                    help="classes in the head; must match the checkpoint")
     args = p.parse_args(argv)
@@ -80,7 +81,8 @@ def _export_with_torch(run_dir, model, train_args) -> None:
         _yolox_export(model, str(out_path), input_size=input_size, opset=13)
     else:
         from ml.models.classifier import export_onnx as _cls_export
-        _cls_export(model, str(out_path), input_size=224, opset=13)
+        size = int(getattr(train_args, "classifier_input_size", 0) or 224)
+        _cls_export(model, str(out_path), input_size=size, opset=13)
 
 
 if __name__ == "__main__":

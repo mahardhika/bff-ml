@@ -88,11 +88,14 @@ def main(argv: list[str] | None = None) -> None:
                    help="dataset cache lifetime in days (default 7)")
     p.add_argument("--model-name", default="bucket-detector")
     p.add_argument("--version", default="0.1.0")
-    p.add_argument("--kind", default="detector", choices=["detector", "classifier"])
+    p.add_argument("--kind", default="detector",
+                   choices=["detector", "classifier", "activity"])
     p.add_argument("--num-classes", type=int, default=0,
                    help="classes in the model head; 0 = take them from the dataset")
     p.add_argument("--input-size", type=int, default=0,
                    help="detector input size; 0 = DETECTOR_INPUT_SIZE (640)")
+    p.add_argument("--classifier-input-size", type=int, default=224,
+                   help="classifier input size (fill and activity heads)")
     p.add_argument("--workers", type=int, default=0,
                    help="dataloader workers; >0 keeps the GPU fed on Windows")
     p.add_argument("--max-images", type=int, default=0,
@@ -126,21 +129,40 @@ def main(argv: list[str] | None = None) -> None:
 
     # 1. Resolve data FIRST so we don't leave an empty run-dir behind
     # if the data path is bogus or unreadable.
-    from ml.data.load import load_dataset
-    if args.data_source == "local":
-        ds = load_dataset("local", path=args.data_path)
-    elif args.data_source == "s3":
-        ds = load_dataset("s3", bucket=args.bucket, prefix=args.prefix,
-                          force=args.force_download,
-                          ttl_days=args.cache_ttl_days)
-    elif args.data_source == "db":
-        if args.dataset_id is None:
-            raise SystemExit("--dataset-id is required when --data-source=db")
-        ds = load_dataset("db", dataset_id=args.dataset_id,
-                          force=args.force_download,
-                          ttl_days=args.cache_ttl_days)
+    activity_root: Path | None = None
+    activity_train = []
+    activity_valid = []
+    if args.kind == "activity":
+        # The activity dataset is read from the label sidecar, not from
+        # the COCO boxes, so it has its own loader.
+        from ml.data.activity import load_activity_samples, resolve_root
+        activity_root, _split = resolve_root(Path(args.data_path))
+        activity_train, activity_classes = load_activity_samples(
+            activity_root, "train", _max_images(args))
+        activity_valid, _ = load_activity_samples(activity_root, "valid", 0)
+
+        class _ActivityDataset:
+            root = activity_root
+            kind = "activity"
+            classes = activity_classes
+
+        ds = _ActivityDataset()
     else:
-        raise NotImplementedError("url source is v0.2")
+        from ml.data.load import load_dataset
+        if args.data_source == "local":
+            ds = load_dataset("local", path=args.data_path)
+        elif args.data_source == "s3":
+            ds = load_dataset("s3", bucket=args.bucket, prefix=args.prefix,
+                              force=args.force_download,
+                              ttl_days=args.cache_ttl_days)
+        elif args.data_source == "db":
+            if args.dataset_id is None:
+                raise SystemExit("--dataset-id is required when --data-source=db")
+            ds = load_dataset("db", dataset_id=args.dataset_id,
+                              force=args.force_download,
+                              ttl_days=args.cache_ttl_days)
+        else:
+            raise NotImplementedError("url source is v0.2")
     log.info("Dataset: root=%s kind=%s classes=%s", ds.root, ds.kind, ds.classes)
 
     # Class count follows the dataset (COCO categories), so one trainer
@@ -159,6 +181,9 @@ def main(argv: list[str] | None = None) -> None:
     class_names = list(ds.classes) or [f"class_{i}" for i in range(num_classes)]
     log.info("Model head: %d classes -> %s", num_classes, class_names)
     input_size = args.input_size or int(os.getenv("DETECTOR_INPUT_SIZE", "640"))
+    classifier_input_size = int(args.classifier_input_size or 224)
+    # The size the weights were built with, for labels.json.
+    model_input_size = input_size if args.kind == "detector" else classifier_input_size
 
     out = Path(args.output_dir) / run_name
     out.mkdir(parents=True, exist_ok=True)
@@ -177,7 +202,7 @@ def main(argv: list[str] | None = None) -> None:
         "cache_ttl_days": float(args.cache_ttl_days),
         "num_classes": num_classes,
         "classes": class_names,
-        "input_size": input_size,
+        "input_size": model_input_size,
     }
     (out / "hparams.json").write_text(json.dumps(hparams, indent=2))
 
@@ -194,10 +219,10 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError:
         torch_available = False
 
-    input_size = int(os.getenv("DETECTOR_INPUT_SIZE", "640"))
     last_loss = float("nan")
     n_images = 0
     n_boxes = 0
+    val_accuracy = float("nan")
 
     if args.kind == "detector":
         log.info("Building YOLOX-S detector (%d classes).", num_classes)
@@ -213,10 +238,26 @@ def main(argv: list[str] | None = None) -> None:
             for epoch in range(1, max(1, args.epochs) + 1):
                 time.sleep(0.05)
                 log.info("epoch %d/%d in 0.1s", epoch, args.epochs)
+    elif args.kind == "activity":
+        log.info("Building activity classifier (%d classes, multi-label).",
+                 num_classes)
+        if torch_available:
+            model = build_fill_classifier(num_classes=num_classes,
+                                          input_size=classifier_input_size)
+            opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+            model.to(device)
+            last_loss, n_images, val_accuracy = _train_activity(
+                model, opt, activity_root, activity_train, activity_valid,
+                args, device, classifier_input_size)
+        else:
+            for epoch in range(1, max(1, args.epochs) + 1):
+                time.sleep(0.05)
+                log.info("epoch %d/%d in 0.1s", epoch, args.epochs)
     else:
         log.info("Building FillClassifier (%d classes).", num_classes)
         if torch_available:
-            model = build_fill_classifier(num_classes=num_classes, input_size=224)
+            model = build_fill_classifier(num_classes=num_classes,
+                                          input_size=classifier_input_size)
             opt = torch.optim.Adam(model.parameters(), lr=args.lr)
             model.to(device)
             last_loss, n_images, n_boxes = _train_classifier(
@@ -232,6 +273,7 @@ def main(argv: list[str] | None = None) -> None:
         "mAP50": 0.0,
         "fill_acc": 0.0,
         "not_visible_recall": 0.0,
+        "val_accuracy": val_accuracy,
         "torch_available": torch_available,
         "device": str(device),
         "epochs": args.epochs,
@@ -270,7 +312,8 @@ def main(argv: list[str] | None = None) -> None:
         "classes": class_names,
         "num_classes": num_classes,
         "kind": args.kind,
-        "input_size": input_size,
+        "input_size": model_input_size,
+        "multi_label": args.kind == "activity",
     }, indent=2), encoding="utf-8")
     log.info("labels.json written: %s", labels_path)
 
@@ -383,6 +426,109 @@ def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
                 last_loss = best
                 break
     return last_loss, n_images, n_boxes
+
+
+def _train_activity(model, opt, root, train_samples, valid_samples,
+                    args, device, input_size: int = 224
+                    ) -> tuple[float, int, float]:
+    """Train the multi-label activity head.
+
+    The loss is a binary cross entropy over the activity classes: a
+    frame can carry several actions at once, so the head uses one
+    sigmoid per class instead of a softmax.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    from ml.data.torch_dataset import ActivityFrames, collate_activity
+
+    num_classes = int(getattr(model.cfg, "num_classes", 0) or 1)
+    frames = ActivityFrames(root, train_samples, num_classes,
+                             input_size=input_size, train=True, split="train")
+    n_images = len(frames)
+    last_loss = float("nan")
+    if n_images == 0:
+        log.warning("No activity frames - running a synthetic warmup so export works.")
+        return last_loss, 0, float("nan")
+
+    loader = DataLoader(
+        frames, batch_size=max(1, min(args.batch_size, n_images)),
+        shuffle=True, collate_fn=collate_activity,
+        num_workers=max(0, int(getattr(args, "workers", 0) or 0)),
+        persistent_workers=bool(int(getattr(args, "workers", 0) or 0)),
+    )
+    loss_fn = torch.nn.BCEWithLogitsLoss()
+    best = float("inf")
+    stale = 0
+    patience = max(1, int(getattr(args, "patience", 12) or 12))
+    for epoch in range(1, max(1, args.epochs) + 1):
+        epoch_t = time.time()
+        model.train()
+        running = 0.0
+        steps = 0
+        batch_t = time.time()
+        seen_total = 0
+        for bi, batch in enumerate(loader, start=1):
+            images = batch["image"].to(device)
+            labels = batch["label"].to(device)
+            logits = model(images)
+            loss = loss_fn(logits, labels)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            running += float(loss.detach().cpu())
+            steps += 1
+            if bi % 50 == 0 or bi == len(loader):
+                now = time.time()
+                done = bi * images.shape[0]
+                rate = (done - seen_total) / max(1e-6, now - batch_t)
+                log.info("  batch %d/%d  %.2f img/s  loss=%.4f",
+                         bi, len(loader), rate, running / max(1, steps))
+                batch_t = now
+                seen_total = done
+        last_loss = running / max(1, steps)
+        log.info("epoch %d/%d loss=%.4f in %.1fs",
+                 epoch, args.epochs, last_loss, time.time() - epoch_t)
+        if last_loss + 1e-4 < best:
+            best = last_loss
+            stale = 0
+        else:
+            stale += 1
+            if stale >= patience:
+                log.info("early stop at epoch %d (best loss=%.4f)", epoch, best)
+                last_loss = best
+                break
+    accuracy = _activity_accuracy(model, root, valid_samples, num_classes,
+                                   input_size, device)
+    return last_loss, n_images, accuracy
+
+
+def _activity_accuracy(model, root, samples, num_classes: int,
+                       input_size: int, device) -> float:
+    """Exact-match accuracy of the multi-label head on the valid split."""
+    import torch
+    from torch.utils.data import DataLoader
+
+    from ml.data.torch_dataset import ActivityFrames, collate_activity
+
+    if not samples:
+        return float("nan")
+    frames = ActivityFrames(root, samples, num_classes,
+                             input_size=input_size, train=False, split="valid")
+    loader = DataLoader(frames, batch_size=32, shuffle=False,
+                         collate_fn=collate_activity)
+    model.eval()
+    hits = 0
+    total = 0
+    with torch.no_grad():
+        for batch in loader:
+            images = batch["image"].to(device)
+            labels = batch["label"].to(device)
+            probs = torch.sigmoid(model(images))
+            predicted = (probs > 0.5).float()
+            hits += int((predicted == labels).all(dim=1).sum().item())
+            total += int(labels.shape[0])
+    return hits / max(1, total)
 
 
 def _train_classifier(model, opt, ds, args, device) -> tuple[float, int, int]:

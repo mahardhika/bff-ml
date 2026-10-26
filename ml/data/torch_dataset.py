@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
@@ -48,6 +47,68 @@ class DetectionFrames:
             "cls": torch.from_numpy(cls).long(),
             "path": str(path),
         }
+
+
+class ActivityFrames:
+    """Frames with a multi-hot activity label.
+
+    ``samples`` are :class:`ml.data.activity.ActivitySample` rows; the
+    image is read from ``root`` and letterboxed to ``input_size``.
+    """
+
+    def __init__(self, root: Path, samples, num_classes: int,
+                 input_size: int = 224, train: bool = True,
+                 split: str = "train") -> None:
+        self.root = Path(root)
+        self.samples = list(samples)
+        self.num_classes = num_classes
+        self.input_size = input_size
+        self.train = train
+        self.split = split
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        import torch
+
+        from ml.data.augment import letterbox
+
+        sample = self.samples[idx]
+        path = self._resolve(sample.file_name)
+        image = _read_bgr(path)
+        canvas, _ = letterbox(image, input_size=self.input_size)
+        if self.train:
+            canvas = canvas[:, ::-1].copy() if idx % 2 else canvas
+        tensor = (torch.from_numpy(canvas[:, :, ::-1].copy())
+                  .permute(2, 0, 1).float() / 255.0)
+        label = torch.zeros(self.num_classes, dtype=torch.float32)
+        for value in sample.labels:
+            if 0 <= value < self.num_classes:
+                label[value] = 1.0
+        return {"image": tensor, "label": label, "path": str(path)}
+
+    def _resolve(self, file_name: str) -> Path:
+        """Find the image: split folder first, then the dataset root."""
+        candidates = [
+            self.root / self.split / file_name,
+            self.root / file_name,
+            self.root / self.split / file_name.replace("images/", ""),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
+
+
+def collate_activity(batch: list[dict]) -> dict:
+    import torch
+
+    return {
+        "image": torch.stack([b["image"] for b in batch], dim=0),
+        "label": torch.stack([b["label"] for b in batch], dim=0),
+        "path": [b["path"] for b in batch],
+    }
 
 
 def collate_detections(batch: list[dict]) -> dict:
