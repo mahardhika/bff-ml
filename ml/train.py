@@ -121,6 +121,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--patience", type=int, default=12,
                    help="stop when train loss has not improved for this many epochs")
+    p.add_argument("--activity-valid-frames", type=int, default=1500,
+                   help="frames sampled from the valid split for activity accuracy")
     p.add_argument("--device", default="auto")
     p.add_argument("--no-sync", action="store_true",
                    help="skip Supabase sync after training")
@@ -154,6 +156,16 @@ def main(argv: list[str] | None = None) -> None:
         activity_train, activity_classes = load_activity_samples(
             activity_root, "train", _max_images(args))
         activity_valid, _ = load_activity_samples(activity_root, "valid", 0)
+        # Keep the eval pass short: the valid split can hold >10k frames and
+        # scoring all of them on a CPU-fallback DirectML op costs minutes.
+        _valid_cap = int(getattr(args, "activity_valid_frames", 1500) or 0)
+        if _valid_cap > 0 and len(activity_valid) > _valid_cap:
+            _valid_total = len(activity_valid)
+            _stride = _valid_total / float(_valid_cap)
+            activity_valid = [activity_valid[int(i * _stride)]
+                              for i in range(_valid_cap)]
+            log.info("Activity valid subset: %d/%d frames",
+                     len(activity_valid), _valid_total)
 
         class _ActivityDataset:
             root = activity_root
@@ -416,7 +428,7 @@ def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
             if bi % 25 == 0 or bi == len(loader):
                 now = time.time()
                 window = now - batch_t
-                done = bi * images.shape[0]
+                done = bi * batch["image"].shape[0]
                 rate = (done - seen_total) / max(1e-6, window)
                 log.info("  batch %d/%d  %.2f img/s  loss=%.4f",
                          bi, len(loader), rate,
@@ -491,7 +503,7 @@ def _train_activity(model, opt, root, train_samples, valid_samples,
             steps += 1
             if bi % 50 == 0 or bi == len(loader):
                 now = time.time()
-                done = bi * images.shape[0]
+                done = bi * batch["image"].shape[0]
                 rate = (done - seen_total) / max(1e-6, now - batch_t)
                 log.info("  batch %d/%d  %.2f img/s  loss=%.4f",
                          bi, len(loader), rate, running / max(1, steps))
