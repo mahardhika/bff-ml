@@ -1,0 +1,9 @@
+# Normalise line endings: the repo stores LF, the OneDrive mirror may
+# hand out CRLF (the workspace is synced from a Windows machine).
+* text=auto eol=lf
+
+*.onnx binary
+*.pt binary
+*.sqlite binary
+*.png binary
+*.jpg binary

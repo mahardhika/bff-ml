@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--model-name", default="bucket-detector")
     p.add_argument("--version", default="0.1.0")
     p.add_argument("--kind", default="detector",
-                   choices=["detector", "classifier", "activity"])
+                   choices=["detector", "classifier", "activity", "fill"])
     p.add_argument("--num-classes", type=int, default=0,
                    help="classes in the model head; 0 = take them from the dataset")
     p.add_argument("--input-size", type=int, default=0,
@@ -123,6 +123,17 @@ def main(argv: list[str] | None = None) -> None:
                    help="stop when train loss has not improved for this many epochs")
     p.add_argument("--activity-valid-frames", type=int, default=1500,
                    help="frames sampled from the valid split for activity accuracy")
+    p.add_argument("--no-pretrained", action="store_true",
+                   help="fill head: train the backbone from scratch instead of "
+                        "using the ImageNet weights")
+    p.add_argument("--fill-class-weight", action="store_true",
+                   help="fill head: weight the loss by the class frequency "
+                        "(the archive has more loaded buckets than empty ones)")
+    p.add_argument("--fill-class-weight-cap", type=float, default=0.0,
+                   help="cap for the computed class weights (0 = no cap). A "
+                        "rare class gets a huge weight otherwise and the head "
+                        "predicts nothing else - with the site footage the "
+                        "not_visible class is 200x smaller than the others")
     p.add_argument("--device", default="auto")
     p.add_argument("--no-sync", action="store_true",
                    help="skip Supabase sync after training")
@@ -148,14 +159,58 @@ def main(argv: list[str] | None = None) -> None:
     activity_root: Path | None = None
     activity_train = []
     activity_valid = []
-    if args.kind == "activity":
-        # The activity dataset is read from the label sidecar, not from
-        # the COCO boxes, so it has its own loader.
-        from ml.data.activity import load_activity_samples, resolve_root
-        activity_root, _split = resolve_root(Path(args.data_path))
-        activity_train, activity_classes = load_activity_samples(
-            activity_root, "train", _max_images(args))
-        activity_valid, _ = load_activity_samples(activity_root, "valid", 0)
+    fill_root: Path | None = None
+    fill_train = []
+    fill_valid = []
+    if args.kind == "fill":
+        # The fill head is trained on the detector's crop: the
+        # ``excavator`` box of every frame, labelled from the temporal
+        # action segments of the archive.
+        from ml.data.fill import FILL_CLASSES, load_fill_samples
+
+        fill_root, _split = _resolve_dataset_root(Path(args.data_path))
+        fill_train = load_fill_samples(fill_root, "train", _max_images(args))
+        fill_valid = load_fill_samples(fill_root, "valid", 0)
+        log.info("Fill dataset: train=%d valid=%d classes=%s",
+                 len(fill_train), len(fill_valid), list(FILL_CLASSES))
+
+        class _FillDataset:
+            root = fill_root
+            kind = "fill"
+            classes = FILL_CLASSES
+
+        ds = _FillDataset()
+    elif args.kind == "activity":
+        if args.data_source == "db":
+            # Labels written in the app: the class-only activity labels on
+            # bff_dataset_items, materialized next to the images.
+            from ml.data.activity import load_db_activity_samples
+            from ml.data.load import load_dataset
+            if args.dataset_id is None:
+                raise SystemExit("--dataset-id is required when --data-source=db")
+            ds = load_dataset("db", dataset_id=args.dataset_id,
+                              force=args.force_download,
+                              ttl_days=args.cache_ttl_days)
+            activity_root = ds.root
+            activity_train, activity_classes = load_db_activity_samples(
+                activity_root, "train", _max_images(args))
+            activity_valid, _ = load_db_activity_samples(activity_root, "valid", 0)
+            ds.classes = activity_classes
+        else:
+            # The activity dataset is read from the label sidecar, not from
+            # the COCO boxes, so it has its own loader.
+            from ml.data.activity import load_activity_samples, resolve_root
+            activity_root, _split = resolve_root(Path(args.data_path))
+            activity_train, activity_classes = load_activity_samples(
+                activity_root, "train", _max_images(args))
+            activity_valid, _ = load_activity_samples(activity_root, "valid", 0)
+
+            class _ActivityDataset:
+                root = activity_root
+                kind = "activity"
+                classes = activity_classes
+
+            ds = _ActivityDataset()
         # Keep the eval pass short: the valid split can hold >10k frames and
         # scoring all of them on a CPU-fallback DirectML op costs minutes.
         _valid_cap = int(getattr(args, "activity_valid_frames", 1500) or 0)
@@ -166,13 +221,6 @@ def main(argv: list[str] | None = None) -> None:
                               for i in range(_valid_cap)]
             log.info("Activity valid subset: %d/%d frames",
                      len(activity_valid), _valid_total)
-
-        class _ActivityDataset:
-            root = activity_root
-            kind = "activity"
-            classes = activity_classes
-
-        ds = _ActivityDataset()
     else:
         from ml.data.load import load_dataset
         if args.data_source == "local":
@@ -199,6 +247,13 @@ def main(argv: list[str] | None = None) -> None:
         num_classes = len(ds.classes)
     elif args.kind == "classifier":
         num_classes = 5
+    elif args.kind == "fill":
+        # The class count comes from the dataset: FILL_CLASSES grew to
+        # three (empty / full / not_visible) for the site footage, where
+        # a loaded bucket is turned away from the camera and the honest
+        # answer is "not visible".
+        from ml.data.fill import FILL_CLASSES
+        num_classes = len(FILL_CLASSES)
     else:
         num_classes = 3
     if ds.classes and args.num_classes > 0 and args.num_classes != len(ds.classes):
@@ -273,6 +328,21 @@ def main(argv: list[str] | None = None) -> None:
             last_loss, n_images, val_accuracy = _train_activity(
                 model, opt, activity_root, activity_train, activity_valid,
                 args, device, classifier_input_size)
+        else:
+            for epoch in range(1, max(1, args.epochs) + 1):
+                time.sleep(0.05)
+                log.info("epoch %d/%d in 0.1s", epoch, args.epochs)
+    elif args.kind == "fill":
+        log.info("Building fill head (%d classes).", num_classes)
+        if torch_available:
+            from ml.models.fill_head import build_fill_head
+            model = build_fill_head(num_classes=num_classes,
+                                    input_size=classifier_input_size,
+                                    pretrained=not args.no_pretrained)
+            opt = _build_optimizer(model, device, args.lr)
+            last_loss, n_images, val_accuracy = _train_fill(
+                model, opt, fill_root, fill_train, fill_valid, args, device,
+                classifier_input_size)
         else:
             for epoch in range(1, max(1, args.epochs) + 1):
                 time.sleep(0.05)
@@ -361,6 +431,21 @@ def main(argv: list[str] | None = None) -> None:
 def _max_images(args) -> int:
     """Image cap for quick runs: ``--max-images`` (or its alias)."""
     return int(getattr(args, "max_images", 0) or getattr(args, "limit_images", 0) or 0)
+
+def _resolve_dataset_root(path: Path) -> tuple[Path, str]:
+    """Find the dataset root and the split name for ``path``.
+
+    Accepts the dataset root (``.../earthmoving-equipment``) or a split
+    folder (``.../earthmoving-equipment/train``).
+    """
+    path = Path(path)
+    if (path / "activity.json").exists():
+        return path, "train"
+    if (path / "train" / "annotations.json").exists():
+        return path, "train"
+    if (path / "annotations.json").exists():
+        return path.parent, path.name
+    return path, "train"
 
 
 def _train_detector(model, loss_fn, opt, ds, args, device, input_size: int
@@ -553,6 +638,140 @@ def _activity_accuracy(model, root, samples, num_classes: int,
             total += int(labels.shape[0])
     return hits / max(1, total)
 
+
+def _train_fill(model, opt, root, train_samples, valid_samples, args, device,
+                 input_size: int = 224) -> tuple[float, int, float]:
+    """Train the binary bucket-fill head.
+
+    The samples are letterboxed ``excavator`` crops, exactly the crop
+    the backend feeds the head at inference time.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    from ml.data.fill import FillCrops, collate_fill
+
+    frames = FillCrops(root, train_samples, input_size=input_size,
+                       train=True, split="train")
+    n_images = len(frames)
+    last_loss = float("nan")
+    if n_images == 0:
+        log.warning("No fill crops - running a synthetic warmup so export works.")
+        return last_loss, 0, float("nan")
+
+    loader = DataLoader(
+        frames, batch_size=max(1, min(args.batch_size, n_images)),
+        shuffle=True, collate_fn=collate_fill,
+        num_workers=max(0, int(getattr(args, "workers", 0) or 0)),
+        persistent_workers=bool(int(getattr(args, "workers", 0) or 0)),
+    )
+    loss_fn = torch.nn.CrossEntropyLoss()
+    # The fill labels are imbalanced (the archive spends more time with a
+    # loaded bucket than with an empty one). Without a weight the head
+    # learns to answer "full" and the empty recall collapses - the
+    # shipped head reached 0.61 on empty against 0.83 on full.
+    if getattr(args, "fill_class_weight", False) and train_samples:
+        counts = torch.bincount(
+            torch.tensor([int(s.label) for s in train_samples]),
+            minlength=2).float()
+        weights = counts.sum() / (2.0 * counts.clamp(min=1.0))
+        cap = float(getattr(args, "fill_class_weight_cap", 0.0) or 0.0)
+        if cap > 0:
+            weights = weights.clamp(max=cap)
+        loss_fn = torch.nn.CrossEntropyLoss(weight=weights.to(device))
+        log.info("Fill class weights: %s (empty/full)",
+                 [round(float(w), 3) for w in weights])
+    best = float("inf")
+    # Early stopping on the TRAIN loss never fires (the train loss
+    # decreases monotonically), so the run always ended on the last -
+    # and most overfitted - epoch. Stop on the validation accuracy and
+    # keep the best weights.
+    best_acc = -1.0
+    best_state: dict | None = None
+    best_epoch = 0
+    stale = 0
+    patience = max(1, int(getattr(args, "patience", 12) or 12))
+    # The probe must be spread over the whole valid split. Taking
+    # valid_samples[:3000] samples the first video(s) only - the loader
+    # groups the samples by video - and the "best" epoch was then picked
+    # on a biased subset (val_acc 0.86 on that probe, 0.71 on the full
+    # split). A stride hits every video.
+    val_probe = valid_samples[::4] if valid_samples else []
+    for epoch in range(1, max(1, args.epochs) + 1):
+        epoch_t = time.time()
+        model.train()
+        running = 0.0
+        steps = 0
+        batch_t = time.time()
+        seen_total = 0
+        for bi, batch in enumerate(loader, start=1):
+            images = batch["image"].to(device)
+            labels = batch["label"].to(device)
+            logits = model(images)
+            loss = loss_fn(logits, labels)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            running += float(loss.detach().cpu())
+            steps += 1
+            if bi % 100 == 0 or bi == len(loader):
+                now = time.time()
+                window = max(1e-6, now - batch_t)
+                done = bi * batch["image"].shape[0]
+                rate = (done - seen_total) / window
+                log.info("  batch %d/%d  %.2f img/s  loss=%.4f",
+                         bi, len(loader), rate, running / max(1, steps))
+                batch_t = now
+                seen_total = done
+        last_loss = running / max(1, steps)
+        val_acc = (_fill_accuracy(model, root, val_probe, input_size, device)
+                   if val_probe else float("nan"))
+        log.info("epoch %d/%d loss=%.4f val_acc=%.4f in %.1fs",
+                 epoch, args.epochs, last_loss, val_acc, time.time() - epoch_t)
+        if val_acc > best_acc + 1e-4:
+            best_acc = val_acc
+            best_epoch = epoch
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in model.state_dict().items()}
+            stale = 0
+        else:
+            stale += 1
+            if stale >= patience:
+                log.info("early stop at epoch %d (best val_acc=%.4f)",
+                         epoch, best_acc)
+                break
+    if best_state is not None:
+        log.info("restoring the best weights (epoch %d, val_acc=%.4f)",
+                 best_epoch, best_acc)
+        model.load_state_dict(best_state)
+        last_loss = best
+    accuracy = _fill_accuracy(model, root, valid_samples, input_size, device)
+    return last_loss, n_images, accuracy
+
+def _fill_accuracy(model, root, samples, input_size: int, device) -> float:
+    """Top-1 accuracy of the fill head on the valid split."""
+    import torch
+    from torch.utils.data import DataLoader
+
+    from ml.data.fill import FillCrops, collate_fill
+
+    if not samples:
+        return float("nan")
+    frames = FillCrops(root, samples, input_size=input_size, train=False,
+                       split="valid")
+    loader = DataLoader(frames, batch_size=64, shuffle=False,
+                        collate_fn=collate_fill)
+    model.eval()
+    hits = 0
+    total = 0
+    with torch.no_grad():
+        for batch in loader:
+            images = batch["image"].to(device)
+            labels = batch["label"].to(device)
+            predicted = model(images).argmax(dim=1)
+            hits += int((predicted == labels).sum().item())
+            total += int(labels.shape[0])
+    return hits / max(1, total)
 
 def _train_classifier(model, opt, ds, args, device) -> tuple[float, int, int]:
     import torch

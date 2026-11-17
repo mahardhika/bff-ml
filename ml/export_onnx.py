@@ -79,6 +79,10 @@ def _export_with_torch(run_dir, model, train_args) -> None:
     if train_args.kind == "detector":
         from ml.models.yolox import export_onnx as _yolox_export
         _yolox_export(model, str(out_path), input_size=input_size, opset=13)
+    elif train_args.kind == "fill":
+        from ml.models.fill_head import export_fill_head_onnx
+        size = int(getattr(train_args, "classifier_input_size", 0) or 224)
+        export_fill_head_onnx(model, str(out_path), input_size=size, opset=13)
     else:
         from ml.models.classifier import export_onnx as _cls_export
         size = int(getattr(train_args, "classifier_input_size", 0) or 224)

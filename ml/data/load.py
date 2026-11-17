@@ -16,6 +16,7 @@ expires after ``CACHE_TTL_DAYS`` (default 7). Once expired the next
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -203,12 +204,11 @@ class DbDataset:
             log.info("force-download: purging cache %s", self.cache)
             _purge(self.cache)
         self.cache.mkdir(parents=True, exist_ok=True)
-        if is_cache_fresh(self.cache, self.ttl_days) and (self.cache / "annotations.json").exists():
-            log.info("DB cache hit (age %.1fh): %s",
-                     cache_age_s(self.cache) / 3600.0, self.cache)
-            classes, cat_index = _read_classes(self.cache, self.kind)
-            return Dataset(root=self.cache, kind=self.kind, classes=classes,
-                           cat_index=cat_index)
+        # The database is the source of truth and the in-app labeler
+        # rewrites bff_dataset_items.labels continuously. A cached
+        # annotations.json would therefore train on stale boxes, so the
+        # annotation side is always re-materialized. The image files
+        # themselves stay cached and are only fetched when missing.
         self._materialize()
         classes, cat_index = _read_classes(self.cache, self.kind)
         return Dataset(root=self.cache, kind=self.kind, classes=classes,
@@ -241,6 +241,7 @@ class DbDataset:
         coco_images = []
         coco_anns = []
         coco_cats: dict[int, str] = {}
+        activity_items: list[dict] = []
         ann_id = 1
         for i, item in enumerate(items, start=1):
             storage_path = item.get("storage_path") or ""
@@ -258,7 +259,9 @@ class DbDataset:
                 "width": width,
                 "height": height,
             })
-            for box in item.get("labels") or []:
+            for box in _as_list(item.get("labels")):
+                if not isinstance(box, dict):
+                    continue
                 bbox = box.get("bbox") or [0, 0, 0, 0]
                 x1, y1, x2, y2 = (bbox + [0, 0, 0, 0])[:4]
                 w, h = max(0.0, x2 - x1), max(0.0, y2 - y1)
@@ -273,6 +276,18 @@ class DbDataset:
                     "iscrowd": 0,
                 })
                 ann_id += 1
+            # Class-only activity labels live in their own column so the
+            # COCO box schema above stays untouched.
+            activity_names = [
+                str(name) for name in _as_list(item.get("activity_labels"))
+                if isinstance(name, str) and name.strip()
+            ]
+            if activity_names:
+                activity_items.append({
+                    "file_name": rel,
+                    "split": str(item.get("split") or "train"),
+                    "labels": activity_names,
+                })
         categories = [{"id": cid, "name": name} for cid, name in sorted(coco_cats.items())]
         if not categories:
             categories = [{"id": 0, "name": "bucket"}, {"id": 1, "name": "truck"},
@@ -283,8 +298,12 @@ class DbDataset:
             "annotations": coco_anns,
             "categories": categories,
         }), encoding="utf-8")
-        log.info("Materialized dataset %s (%d items) -> %s",
-                 self.dataset_id, len(items), self.cache)
+        (self.cache / "activity_labels.json").write_text(json.dumps({
+            "items": activity_items,
+        }), encoding="utf-8")
+        log.info("Materialized dataset %s (%d items, %d boxes, %d activity frames) -> %s",
+                 self.dataset_id, len(items), len(coco_anns), len(activity_items),
+                 self.cache)
 
 
 class UrlDataset:
@@ -304,6 +323,23 @@ class UrlDataset:
 
 
 # --- internals ---
+
+
+def _as_list(value) -> list:
+    """JSONB column as a list.
+
+    PostgREST hands back a list, but a driver that speaks plain text can
+    return the JSON as a string. Both shapes are accepted here so the
+    label columns can be read either way.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return value if isinstance(value, list) else []
 
 
 def _hash(s: str) -> str:

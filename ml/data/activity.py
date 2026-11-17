@@ -176,6 +176,69 @@ def load_activity_samples(root: Path, split: str = "train", limit: int = 0
     return samples, classes
 
 
+#: The activity vocabulary the in-app labeler writes.
+ACTIVITY_CLASSES: tuple[str, ...] = (
+    "idle", "swing_bucket", "load_bucket", "dump", "move",
+)
+
+
+def load_db_activity_samples(root: Path, split: str = "train", limit: int = 0
+                             ) -> tuple[list[ActivitySample], tuple[str, ...]]:
+    """Activity samples written by the in-app labeler.
+
+    The labeler stores class-only labels (no box) per frame in the
+    ``activity_labels`` column of ``bff_dataset_items``. The trainer
+    materializes them next to the images as ``activity_labels.json``;
+    this reader turns that file back into multi-hot samples.
+
+    The multi-label set is open: a frame may carry several actions at
+    once, so the class list is the union of every class seen in the
+    file, ordered by :data:`ACTIVITY_CLASSES` first.
+    """
+    root = Path(root)
+    path = root / "activity_labels.json"
+    if not path.exists():
+        log.warning("No activity_labels.json under %s - no labelled frames.", root)
+        return [], ACTIVITY_CLASSES
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not read %s: %s", path, exc)
+        return [], ACTIVITY_CLASSES
+    rows = data.get("items") or []
+    seen: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for name in row.get("labels") or []:
+            name = str(name)
+            if name and name not in seen:
+                seen.append(name)
+    classes = tuple(ACTIVITY_CLASSES + tuple(c for c in seen if c not in ACTIVITY_CLASSES))
+    index = {name: i for i, name in enumerate(classes)}
+    samples: list[ActivitySample] = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        if split and str(row.get("split") or "train") != split:
+            continue
+        labels = tuple(sorted({
+            index[str(name)] for name in (row.get("labels") or [])
+            if str(name) in index
+        }))
+        if not labels:
+            continue
+        name = str(row.get("file_name") or "")
+        samples.append(ActivitySample(name, "", i, labels))
+    samples = _spread(samples, limit)
+    if not samples:
+        log.warning("No labelled activity frames in %s (%s)", root, split)
+    else:
+        log.info("Activity (db) %s/%s: %d frames, %d classes -> %s",
+                 root, split, len(samples), len(classes), list(classes))
+    return samples, classes
+
+
 def label_distribution(samples: Sequence[ActivitySample], num_classes: int
                        ) -> list[int]:
     """How many frames carry each class."""

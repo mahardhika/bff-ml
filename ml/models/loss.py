@@ -56,7 +56,8 @@ class YOLOXLoss(nn.Module):
     """Composite YOLOX loss driven by center-based assignments."""
 
     def __init__(self, num_classes: int, strides=(8, 16, 32),
-                 loss_weight: dict | None = None) -> None:
+                 loss_weight: dict | None = None,
+                 obj_pos_weight: float = 1000.0) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.strides = strides
@@ -64,6 +65,16 @@ class YOLOXLoss(nn.Module):
         self.loss_weight = loss_weight or {
             "obj": 1.0, "cls": 1.0, "reg": 5.0, "l1": 1.0,
         }
+        # Weight of the positive cells in the objectness term.
+        #
+        # A 640px frame carries 8,400 grid cells (strides 8/16/32) and the
+        # datasets average 1.3-1.9 positives per image, so an unweighted
+        # objectness BCE is ~99,98% background. The background gradient then
+        # outweighs the positive one and the head converges to "no object
+        # anywhere": the shipped weights peak at obj 0.0100 (earthmoving) /
+        # 0.0991 (construction-vehicle), so nothing clears the configured
+        # confidence threshold and the detector never fires.
+        self.obj_pos_weight = float(obj_pos_weight)
 
     def forward(self, preds: list[torch.Tensor], assignments: list[dict] | None
                 ) -> dict[str, torch.Tensor]:
@@ -80,13 +91,20 @@ class YOLOXLoss(nn.Module):
         reg_acc = torch.zeros((), device=device)
         l1_acc = torch.zeros((), device=device)
         n_pos = 0
-        n_obj = 0
 
         for pred, assigned, stride in zip(preds, assignments, self.strides):
             pos = assigned["positive_mask"]
             obj_target = pos.to(pred.dtype).unsqueeze(1)
-            obj_acc = obj_acc + self.bce(pred[:, 4:5], obj_target)
-            n_obj += obj_target.numel()
+            # Weighted mean over the cells of this level: the positive
+            # cells count ``obj_pos_weight`` times, so their gradient
+            # outweighs the thousands of background cells together, while
+            # the term keeps the same magnitude as before and does not
+            # drown the reg/l1 terms.
+            cell_loss = F.binary_cross_entropy_with_logits(
+                pred[:, 4:5], obj_target, reduction="none")
+            weight = torch.ones_like(pred[:, 4:5])
+            weight[pos.unsqueeze(1)] = self.obj_pos_weight
+            obj_acc = obj_acc + (cell_loss * weight).sum() / weight.sum()
 
             if not pos.any():
                 continue
@@ -108,9 +126,8 @@ class YOLOXLoss(nn.Module):
             cls_acc = cls_acc + self.bce(cls_logits, cls_oh)
 
         n_pos = max(1, n_pos)
-        n_obj = max(1, n_obj)
         return {
-            "obj": obj_acc / n_obj * self.loss_weight["obj"],
+            "obj": obj_acc / n_pos * self.loss_weight["obj"],
             "cls": cls_acc / n_pos * self.loss_weight["cls"],
             "reg": reg_acc / n_pos * self.loss_weight["reg"],
             "l1": l1_acc / (n_pos * 4) * self.loss_weight["l1"],
