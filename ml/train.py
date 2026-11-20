@@ -121,6 +121,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--patience", type=int, default=12,
                    help="stop when train loss has not improved for this many epochs")
+    p.add_argument("--det-obj-pos-weight", type=float, default=1000.0,
+                   help="detector: weight of the positive cells in the "
+                        "objectness term")
+    p.add_argument("--det-l1-weight", type=float, default=1.0,
+                   help="detector: weight of the pixel-unit L1 box term; "
+                        "lower it for small objects, where it otherwise "
+                        "outweighs the IoU term and the model regresses "
+                        "to the median box")
+    p.add_argument("--det-reg-weight", type=float, default=5.0,
+                   help="detector: weight of the IoU box term")
     p.add_argument("--activity-valid-frames", type=int, default=1500,
                    help="frames sampled from the valid split for activity accuracy")
     p.add_argument("--no-pretrained", action="store_true",
@@ -310,7 +320,16 @@ def main(argv: list[str] | None = None) -> None:
         if torch_available:
             model = build_yolox_s(num_classes=num_classes, input_size=input_size)
             opt = _build_optimizer(model, device, args.lr)
-            loss_fn = YOLOXLoss(num_classes=num_classes)
+            loss_fn = YOLOXLoss(
+                num_classes=num_classes,
+                obj_pos_weight=float(getattr(args, "det_obj_pos_weight", 1000.0)),
+                loss_weight={
+                    "obj": 1.0,
+                    "cls": 1.0,
+                    "reg": float(getattr(args, "det_reg_weight", 5.0)),
+                    "l1": float(getattr(args, "det_l1_weight", 1.0)),
+                },
+            )
             last_loss, n_images, n_boxes = _train_detector(
                 model, loss_fn, opt, ds, args, device, input_size)
         else:

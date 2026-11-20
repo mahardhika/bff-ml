@@ -65,6 +65,11 @@ class YOLOXLoss(nn.Module):
         self.loss_weight = loss_weight or {
             "obj": 1.0, "cls": 1.0, "reg": 5.0, "l1": 1.0,
         }
+        # The L1 term is in PIXEL units, so for a small object it dwarfs
+        # the IoU term: an L1-only optimum is the MEDIAN box, and the
+        # model then predicts the same box in every frame. Scaling it
+        # down lets the scale-invariant IoU term drive the regression.
+        # The default keeps the shipped behaviour (1.0).
         # Weight of the positive cells in the objectness term.
         #
         # A 640px frame carries 8,400 grid cells (strides 8/16/32) and the
