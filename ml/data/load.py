@@ -394,23 +394,6 @@ def _read_classes(root: Path, kind: str) -> tuple[tuple[str, ...], dict[int, int
     return (), {}
 
 
-def _annotation_box(a: dict, image: dict | None) -> list[float]:
-    """The box of one annotation, as corners [x1, y1, x2, y2].
-
-    COCO stores ``bbox`` as [x, y, width, height] and always declares the
-    size of the image. The legacy earthmoving annotations store the
-    corners and declare no size at all. Reading one format as the other
-    supervises the regression with the wrong box: a legacy corner box
-    read as COCO is 40% too wide and too tall, and the model learns that
-    oversized box instead of the machine.
-    """
-    bbox = a.get("bbox") or [0, 0, 0, 0]
-    x, y, v3, v4 = (float(v) for v in list(bbox)[:4])
-    if image and image.get("width") and image.get("height"):
-        return [x, y, x + v3, y + v4]
-    return [x, y, v3, v4]
-
-
 def _iter_coco(root: Path, cat_index: dict[int, int] | None = None
                ) -> Iterator[tuple[Path, dict]]:
     import json
@@ -432,12 +415,11 @@ def _iter_coco(root: Path, cat_index: dict[int, int] | None = None
         anns = ann_by_image.get(image_id, [])
         labels = []
         for a in anns:
-            bbox = a["bbox"]
+            x, y, w, h = a["bbox"]
             raw_id = int(a.get("category_id", 0))
-            box = _annotation_box(a, image)
             labels.append({
                 "category_id": idx.get(raw_id, raw_id),
-                "bbox": box,
+                "bbox": [x, y, x + w, y + h],
             })
         yield img_path, {"boxes": labels, "width": image["width"], "height": image["height"]}
 

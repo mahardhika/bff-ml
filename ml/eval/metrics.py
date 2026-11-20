@@ -65,23 +65,6 @@ PRE_NMS_TOPK = 500
 # small numeric helpers
 # --------------------------------------------------------------------------
 
-def _gt_box(a: dict, image: dict | None) -> np.ndarray:
-    """The ground-truth box of one annotation, in original pixels.
-
-    COCO stores ``bbox`` as ``[x, y, width, height]`` and always declares
-    the size of the image. The legacy earthmoving annotations store the
-    corners ``[x1, y1, x2, y2]`` and declare no size at all. Reading one
-    format as the other makes the evaluator compare against boxes that
-    are 40% too wide, so the whole mAP of the shipped model is measured
-    against the wrong ground truth.
-    """
-    bbox = a.get("bbox") or [0, 0, 0, 0]
-    x, y, v3, v4 = (float(v) for v in list(bbox)[:4])
-    if image and image.get("width") and image.get("height"):
-        return np.array([x, y, x + v3, y + v4], dtype=np.float32)
-    return np.array([x, y, v3, v4], dtype=np.float32)
-
-
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     """Numerically stable sigmoid (same as backend/core/detector.py)."""
     return 1.0 / (1.0 + np.exp(-x))
@@ -390,12 +373,13 @@ def evaluate_detector(
         gt_boxes: list[tuple[int, np.ndarray]] = []
         gt_list = []
         for a in ann_by_image.get(image_id, []):
+            x, y, w, h = (float(v) for v in a["bbox"])
             cat_id = int(a.get("category_id", 0))
             cls_idx = next((k for k, v in gt["class_to_cat"].items()
                             if v == cat_id), None)
             if cls_idx is None:
                 continue
-            box = _gt_box(a, im)
+            box = np.array([x, y, x + w, y + h], dtype=np.float32)
             gt_boxes.append((cls_idx, box))
             gt_list.append({
                 "id": int(a.get("id", len(gt_list) + 1)),
@@ -660,14 +644,14 @@ def _detector_val_loss(sess, in_name: str, split_dir: Path, images: list,
                 canvas[:, :, ::-1].astype(np.float32) / 255.0, (2, 0, 1)))
             boxes, cls = [], []
             for a in ann_by_image.get(int(im.get("id", 0)), []):
+                x, y, w, h = (float(v) for v in a["bbox"])
                 cat_id = int(a.get("category_id", 0))
                 cls_idx = next((k for k, v in gt["class_to_cat"].items()
                                 if v == cat_id), None)
                 if cls_idx is None:
                     continue
-                bx = _gt_box(a, im)
-                boxes.append([bx[0] * scale, bx[1] * scale,
-                              bx[2] * scale, bx[3] * scale])
+                boxes.append([x * scale, y * scale,
+                              (x + w) * scale, (y + h) * scale])
                 cls.append(cls_idx)
             if boxes:
                 box_list.append(torch.tensor(boxes, dtype=torch.float32))
